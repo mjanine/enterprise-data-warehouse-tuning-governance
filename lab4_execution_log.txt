@@ -1,0 +1,316 @@
+
+================================================================================
+ LABORATORY ACTIVITY 4: OPTIMIZATION & DATA MART EXECUTION AUDIT
+================================================================================
+
+Group 11: Streaming Media User Subscription & Watch-Time Analytics Warehouse
+Students: Sola, Mariella Janine A. | De Castro, Brent Gabriel
+Instructor: Prof Rob Malitao
+Execution Timestamp: 2026-10-12 20:41:12
+
+--- 1. CONFIGURING SQLITE ENGINE PRAGMAS ---
+[PRAGMA] Journal Mode set to: WAL (Enables concurrent reads during writes)
+[PRAGMA] Foreign Keys Enforced: ON (Enforces referential integrity)
+[PRAGMA] Synchronous Mode set to: 1 (Optimized for WAL)
+[PRAGMA] Cache Size configured to: 64,000 KB (64 MB in-memory cache)
+[PRAGMA] Temp Store configured to: MEMORY (Fast sort & hash operations)
+
+--- 2. AUTOMATED ONLINE DATABASE BACKUP (SQLITE BACKUP API) ---
+[BACKUP] Initiating live online backup from 'warehouse.db' to 'warehouse_backup.db'...
+[BACKUP] Online backup completed successfully in 19.79 ms.
+[BACKUP] Backup file size: 4.48 MB (warehouse_backup.db)
+[BACKUP VERIFY] Database integrity check: OK
+[BACKUP VERIFY] Table 'content_catalog': 8,807 verified rows.
+[BACKUP VERIFY] Table 'user_subscriptions': 500 verified rows.
+[BACKUP VERIFY] Table 'watch_logs': 3,000 verified rows.
+[BACKUP VERIFY] Table 'sqlite_stat1': 13 verified rows.
+
+--- 3. PRE-OPTIMIZATION BENCHMARK & EXPLAIN QUERY PLAN (BEFORE INDEXING) ---
+[BENCHMARK] Reverting any existing custom indexes to measure true baseline...
+[BENCHMARK] Executing queries on unindexed/baseline warehouse tables...
+
+[QUERY: Q1_STREAKS] Window Function: Sequential Viewing Streaks (PARTITION BY user_id ORDER BY watch_date)
+  Latency (Baseline): 4.409 ms
+  Explain Query Plan:
+    - CO-ROUTINE DateDiffs
+    - CO-ROUTINE (subquery-4)
+    - CO-ROUTINE RankedLogs
+    - SCAN watch_logs
+    - USE TEMP B-TREE FOR DISTINCT
+    - SCAN RankedLogs
+    - USE TEMP B-TREE FOR ORDER BY
+    - SCAN (subquery-4)
+    - SCAN DateDiffs
+    - USE TEMP B-TREE FOR GROUP BY
+    - USE TEMP B-TREE FOR ORDER BY
+
+[QUERY: Q2_MULTI_JOIN] High-Cardinality Multi-Table Join & Aggregation (watch_logs JOIN catalog JOIN users)
+  Latency (Baseline): 2.219 ms
+  Explain Query Plan:
+    - SCAN wl
+    - BLOOM FILTER ON us (user_id=?)
+    - SEARCH us USING INTEGER PRIMARY KEY (rowid=?)
+    - SEARCH cc USING INDEX sqlite_autoindex_content_catalog_1 (show_id=?)
+    - USE TEMP B-TREE FOR GROUP BY
+    - USE TEMP B-TREE FOR ORDER BY
+
+[QUERY: Q3_FILTER_RANGE] High-Selectivity Date Range & Completion Filter (watch_date BETWEEN AND completion >= 0.8)
+  Latency (Baseline): 0.151 ms
+  Explain Query Plan:
+    - SCAN wl
+    - USE TEMP B-TREE FOR ORDER BY
+
+[QUERY: Q4_CATALOG_FILTER] Content Catalog Filtering by Type and Release Era (type = 'Movie' AND release_year >= 2018)
+  Latency (Baseline): 0.535 ms
+  Explain Query Plan:
+    - SCAN content_catalog
+    - USE TEMP B-TREE FOR ORDER BY
+
+--- 3. STRATEGIC B-TREE INDEX CREATION (DDL EXECUTION) ---
+[DDL] Created Index: idx_watch_logs_user_id (0.66 ms)
+      Purpose: Single-column index on foreign key user_id for rapid join resolution.
+      SQL: CREATE INDEX IF NOT EXISTS idx_watch_logs_user_id ON watch_logs(user_id);
+
+[DDL] Created Index: idx_watch_logs_show_id (0.93 ms)
+      Purpose: Single-column index on foreign key show_id linking watch logs to catalog.
+      SQL: CREATE INDEX IF NOT EXISTS idx_watch_logs_show_id ON watch_logs(show_id);
+
+[DDL] Created Index: idx_watch_logs_watch_date (0.85 ms)
+      Purpose: Single-column index on watch_date for temporal filtering.
+      SQL: CREATE INDEX IF NOT EXISTS idx_watch_logs_watch_date ON watch_logs(watch_date);
+
+[DDL] Created Index: idx_user_subscriptions_status (0.13 ms)
+      Purpose: Single-column index on account status ('Active', 'Cancelled', 'Expired').
+      SQL: CREATE INDEX IF NOT EXISTS idx_user_subscriptions_status ON user_subscriptions(status);
+
+[DDL] Created Index: idx_user_subscriptions_plan (0.21 ms)
+      Purpose: Single-column index on plan tier ('Basic', 'Standard', 'Premium').
+      SQL: CREATE INDEX IF NOT EXISTS idx_user_subscriptions_plan ON user_subscriptions(plan_type);
+
+[DDL] Created Index: idx_content_catalog_type (1.96 ms)
+      Purpose: Single-column index on content type ('Movie', 'TV Show').
+      SQL: CREATE INDEX IF NOT EXISTS idx_content_catalog_type ON content_catalog(type);
+
+[DDL] Created Index: idx_content_catalog_release_year (1.75 ms)
+      Purpose: Single-column index on release_year for release era range filtering.
+      SQL: CREATE INDEX IF NOT EXISTS idx_content_catalog_release_year ON content_catalog(release_year);
+
+[DDL] Created Index: idx_watch_logs_user_date (0.91 ms)
+      Purpose: Compound index on (user_id, watch_date): Eliminates TEMP B-TREE sorts for window functions partitioned by user_id and ordered by date.
+      SQL: CREATE INDEX IF NOT EXISTS idx_watch_logs_user_date ON watch_logs(user_id, watch_date);
+
+[DDL] Created Index: idx_watch_logs_show_dur_comp (0.99 ms)
+      Purpose: Compound covering index on (show_id, watch_duration_minutes, completion_percentage) for ultra-fast title metrics aggregation.
+      SQL: CREATE INDEX IF NOT EXISTS idx_watch_logs_show_dur_comp ON watch_logs(show_id, watch_duration_minutes, completion_percentage);
+
+[DDL] Created Index: idx_watch_logs_date_comp (0.98 ms)
+      Purpose: Compound index on (watch_date, completion_percentage) for high-selectivity temporal engagement queries.
+      SQL: CREATE INDEX IF NOT EXISTS idx_watch_logs_date_comp ON watch_logs(watch_date, completion_percentage);
+
+[DDL] Created Index: idx_user_subs_status_plan (0.26 ms)
+      Purpose: Compound index on (status, plan_type) for targeted active subscriber segment lookups.
+      SQL: CREATE INDEX IF NOT EXISTS idx_user_subs_status_plan ON user_subscriptions(status, plan_type);
+
+[DDL] Created Index: idx_catalog_type_year (3.24 ms)
+      Purpose: Compound index on (type, release_year) for catalog slicing and filtering.
+      SQL: CREATE INDEX IF NOT EXISTS idx_catalog_type_year ON content_catalog(type, release_year);
+
+[OPTIMIZE] Executed 'ANALYZE;' to update SQLite query planner statistics.
+
+--- 4. POST-OPTIMIZATION BENCHMARK & EXPLAIN QUERY PLAN (AFTER INDEXING) ---
+[BENCHMARK] Executing queries on tuned warehouse with active B-Tree indexes...
+
+[QUERY: Q1_STREAKS] Window Function: Sequential Viewing Streaks (PARTITION BY user_id ORDER BY watch_date)
+  Latency (Optimized): 3.170 ms
+  Explain Query Plan:
+    + CO-ROUTINE DateDiffs
+    + CO-ROUTINE (subquery-4)
+    + CO-ROUTINE RankedLogs
+    + SCAN watch_logs USING COVERING INDEX idx_watch_logs_user_date
+    + SCAN RankedLogs
+    + USE TEMP B-TREE FOR ORDER BY
+    + SCAN (subquery-4)
+    + SCAN DateDiffs
+    + USE TEMP B-TREE FOR GROUP BY
+    + USE TEMP B-TREE FOR ORDER BY
+
+[QUERY: Q2_MULTI_JOIN] High-Cardinality Multi-Table Join & Aggregation (watch_logs JOIN catalog JOIN users)
+  Latency (Optimized): 2.139 ms
+  Explain Query Plan:
+    + SEARCH us USING INDEX idx_user_subscriptions_status (status=?)
+    + SEARCH wl USING INDEX idx_watch_logs_user_id (user_id=?)
+    + SEARCH cc USING INDEX sqlite_autoindex_content_catalog_1 (show_id=?)
+    + USE TEMP B-TREE FOR GROUP BY
+    + USE TEMP B-TREE FOR ORDER BY
+
+[QUERY: Q3_FILTER_RANGE] High-Selectivity Date Range & Completion Filter (watch_date BETWEEN AND completion >= 0.8)
+  Latency (Optimized): 0.041 ms
+  Explain Query Plan:
+    + SEARCH wl USING INDEX idx_watch_logs_watch_date (watch_date>? AND watch_date<?)
+    + USE TEMP B-TREE FOR LAST TERM OF ORDER BY
+
+[QUERY: Q4_CATALOG_FILTER] Content Catalog Filtering by Type and Release Era (type = 'Movie' AND release_year >= 2018)
+  Latency (Optimized): 0.103 ms
+  Explain Query Plan:
+    + SEARCH content_catalog USING INDEX idx_catalog_type_year (type=? AND release_year>?)
+    + USE TEMP B-TREE FOR LAST TERM OF ORDER BY
+
+--- 4. QUERY PLAN & LATENCY COMPARISON (BEFORE VS. AFTER INDEXING) ---
+QUERY ID        | BEFORE (ms)  | AFTER (ms)   | IMPROVEMENT    | STATUS
+---------------------------------------------------------------------------
+Q1_STREAKS      |      4.409 ms |      3.170 ms |       28.11% | OPTIMIZED
+Q2_MULTI_JOIN   |      2.219 ms |      2.139 ms |        3.57% | OPTIMIZED
+Q3_FILTER_RANGE |      0.151 ms |      0.041 ms |       73.06% | OPTIMIZED
+Q4_CATALOG_FILTER |      0.535 ms |      0.103 ms |       80.76% | OPTIMIZED
+
+================================================================================
+DETAILED EXPLAIN QUERY PLAN TRANSFORMATIONS:
+================================================================================
+
+>>> Query: Window Function: Sequential Viewing Streaks (PARTITION BY user_id ORDER BY watch_date)
+  [BEFORE INDEXING PLAN]:
+    - CO-ROUTINE DateDiffs
+    - CO-ROUTINE (subquery-4)
+    - CO-ROUTINE RankedLogs
+    - SCAN watch_logs
+    - USE TEMP B-TREE FOR DISTINCT
+    - SCAN RankedLogs
+    - USE TEMP B-TREE FOR ORDER BY
+    - SCAN (subquery-4)
+    - SCAN DateDiffs
+    - USE TEMP B-TREE FOR GROUP BY
+    - USE TEMP B-TREE FOR ORDER BY
+  [AFTER INDEXING PLAN]:
+    + CO-ROUTINE DateDiffs
+    + CO-ROUTINE (subquery-4)
+    + CO-ROUTINE RankedLogs
+    + SCAN watch_logs USING COVERING INDEX idx_watch_logs_user_date
+    + SCAN RankedLogs
+    + USE TEMP B-TREE FOR ORDER BY
+    + SCAN (subquery-4)
+    + SCAN DateDiffs
+    + USE TEMP B-TREE FOR GROUP BY
+    + USE TEMP B-TREE FOR ORDER BY
+  --> Verification: Full table scans eliminated and replaced by index searches: True
+
+>>> Query: High-Cardinality Multi-Table Join & Aggregation (watch_logs JOIN catalog JOIN users)
+  [BEFORE INDEXING PLAN]:
+    - SCAN wl
+    - BLOOM FILTER ON us (user_id=?)
+    - SEARCH us USING INTEGER PRIMARY KEY (rowid=?)
+    - SEARCH cc USING INDEX sqlite_autoindex_content_catalog_1 (show_id=?)
+    - USE TEMP B-TREE FOR GROUP BY
+    - USE TEMP B-TREE FOR ORDER BY
+  [AFTER INDEXING PLAN]:
+    + SEARCH us USING INDEX idx_user_subscriptions_status (status=?)
+    + SEARCH wl USING INDEX idx_watch_logs_user_id (user_id=?)
+    + SEARCH cc USING INDEX sqlite_autoindex_content_catalog_1 (show_id=?)
+    + USE TEMP B-TREE FOR GROUP BY
+    + USE TEMP B-TREE FOR ORDER BY
+  --> Verification: Full table scans eliminated and replaced by index searches: True
+
+>>> Query: High-Selectivity Date Range & Completion Filter (watch_date BETWEEN AND completion >= 0.8)
+  [BEFORE INDEXING PLAN]:
+    - SCAN wl
+    - USE TEMP B-TREE FOR ORDER BY
+  [AFTER INDEXING PLAN]:
+    + SEARCH wl USING INDEX idx_watch_logs_watch_date (watch_date>? AND watch_date<?)
+    + USE TEMP B-TREE FOR LAST TERM OF ORDER BY
+  --> Verification: Full table scans eliminated and replaced by index searches: True
+
+>>> Query: Content Catalog Filtering by Type and Release Era (type = 'Movie' AND release_year >= 2018)
+  [BEFORE INDEXING PLAN]:
+    - SCAN content_catalog
+    - USE TEMP B-TREE FOR ORDER BY
+  [AFTER INDEXING PLAN]:
+    + SEARCH content_catalog USING INDEX idx_catalog_type_year (type=? AND release_year>?)
+    + USE TEMP B-TREE FOR LAST TERM OF ORDER BY
+  --> Verification: Full table scans eliminated and replaced by index searches: True
+
+--- 5. MATERIALIZING DEPARTMENTAL DATA MART (viewer_watchtime_mart.db) ---
+[MART] Creating and materializing isolated data mart at: 'viewer_watchtime_mart.db'...
+
+[MART TABLE 1] Extracting: 'monthly_genre_performance'...
+      Materialized 574 rows into 'monthly_genre_performance'.
+[MART TABLE 2] Extracting: 'content_engagement_summary'...
+      Materialized 2545 rows into 'content_engagement_summary'.
+[MART TABLE 3] Extracting: 'subscriber_viewing_habits'...
+      Materialized 500 rows into 'subscriber_viewing_habits'.
+[MART TABLE 4] Extracting: 'daily_platform_watchtime'...
+      Materialized 450 rows into 'daily_platform_watchtime'.
+
+[MART OPTIMIZE] Applying high-speed B-Tree indexes on data mart tables...
+[MART COMPLETE] Data mart materialization finished. Database size: 0.00 MB (viewer_watchtime_mart.db)
+
+------------------------------------------------------------------
+DATA MART TABLE                  | ROW COUNT    | STATUS
+------------------------------------------------------------------
+monthly_genre_performance        | 574          | VERIFIED
+content_engagement_summary       | 2545         | VERIFIED
+subscriber_viewing_habits        | 500          | VERIFIED
+daily_platform_watchtime         | 450          | VERIFIED
+------------------------------------------------------------------
+
+[SYNC] Copying materialized databases and log to 'Lesson 7-Activity'...
+
+[SUCCESS] lab_optimize.py completed successfully.
+
+================================================================================
+ LABORATORY ACTIVITY 4: DATA GOVERNANCE & SCHEMA VALIDATION AUDIT
+================================================================================
+
+Group 11: Streaming Media User Subscription & Watch-Time Analytics Warehouse
+Students: Sola, Mariella Janine A. | De Castro, Brent Gabriel
+Instructor: Prof Rob Malitao
+Audit Timestamp: 2026-10-12 20:41:13
+
+--- 1.1 DDL DEFINITIONS: STRICT RELATIONAL SCHEMA & CONSTRAINTS ---
+[DDL SUCCESS] Created relational tables with strict CHECK, NOT NULL, and FK constraints:
+  - content_catalog_governed
+  - user_subscriptions_governed
+  - watch_logs_governed
+
+--- 1.2 RELATIONAL CONSTRAINT VIOLATION TESTS (SQLITE TEST SUITE) ---
+
+TEST DESCRIPTION                           | OUTCOME            | VERIFICATION DETAIL
+-----------------------------------------------------------------------------------------------
+Test 0: Valid Baseline Insert              | SUCCESS            | Valid dimension and fact records
+Test 1: Negative Monthly Fee (-$15.49)     | PASSED (BLOCKED)   | IntegrityError caught: CHECK con
+Test 2: Negative Watch Duration (-45 mins) | PASSED (BLOCKED)   | IntegrityError caught: CHECK con
+Test 3: Completion > 1.0 (185%)            | PASSED (BLOCKED)   | IntegrityError caught: CHECK con
+Test 4: Invalid Plan Type ('UltraVIP')     | PASSED (BLOCKED)   | IntegrityError caught: CHECK con
+Test 5: FK Violation (Orphan user_id=999999) | PASSED (BLOCKED)   | IntegrityError caught: FOREIGN K
+Test 6: Invalid Release Year (1820)        | PASSED (BLOCKED)   | IntegrityError caught: CHECK con
+-----------------------------------------------------------------------------------------------
+
+
+--- 1.3 POPULATING GOVERNED RELATIONAL TABLES ---
+[DATA INTEGRITY] Successfully validated and loaded into governed schema:
+  - content_catalog_governed:    8,808 verified records
+  - user_subscriptions_governed:  501 verified records
+  - watch_logs_governed:         3,000 verified records
+
+--- 2. MONGODB SCHEMA GOVERNANCE ($jsonSchema VALIDATION) ---
+[MONGO CONNECT] Successfully connected to live MongoDB server at 'mongodb://localhost:27017/'.
+[MONGO DATABASE] Target Governance DB: 'streaming_governance_dw'
+[MONGO DDL] Created collection 'watch_history_documents' with STRICT $jsonSchema validator.
+[MONGO DDL] Created collection 'viewer_feedback_documents' with STRICT $jsonSchema validator.
+
+--- 2.1 MONGODB SCHEMA VALIDATION TESTS ---
+
+MONGO TEST CASE                               | OUTCOME            | VERIFICATION RESULT
+-----------------------------------------------------------------------------------------------
+Test M1: Valid Compliant Document Insert      | PASSED (ACCEPTED)  | Document conformed to $jsonSchema and was saved.
+Test M2: Negative Watch Duration (-30)        | PASSED (BLOCKED)   | Rejected: watch_duration_minutes minimum is 1
+Test M3: Completion Percentage > 1.0 (1.45)   | PASSED (BLOCKED)   | Rejected: completion_percentage maximum is 1.0
+Test M4: Missing Required 'subscriber_tier'   | PASSED (BLOCKED)   | Rejected: missing required field 'subscriber_tier'
+Test M5: Unauthorized Device ('Smart Microwave') | PASSED (BLOCKED)   | Rejected: device_type not in authorized enum
+Test M6: Out-of-bounds Rating Score (10 stars) | PASSED (BLOCKED)   | Rejected: rating_score maximum is 5
+Test M7: Valid Viewer Feedback Insert         | PASSED (ACCEPTED)  | Compliant feedback document accepted.
+-----------------------------------------------------------------------------------------------
+
+[MONGO POPULATE] Successfully loaded compliant records into governed document store:
+  - watch_history_documents: 51 validated documents
+  - viewer_feedback_documents: 1 validated documents
+
+[SUCCESS] lab_governance.py execution completed successfully.

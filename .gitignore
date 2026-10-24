@@ -1,0 +1,8 @@
+# Database binaries
+*.db
+
+# Unneeded formats / system files
+*.docx
+desktop.ini
+__pycache__/
+.venv/
